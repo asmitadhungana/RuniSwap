@@ -3,13 +3,27 @@ pragma solidity ^0.8.4;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
+interface IFactory {
+  function getExchange(address _tokenAddress) external returns (address);
+}
+
+interface IExchange {
+    function ethToTokenSwap(uint256 _minTokens) external payable;
+
+    function ethToTokenTransfer(uint256 _minTokens, address _recipient)
+        external
+        payable;
+}
+
 contract Exchange is ERC20 {
     address public tokenAddress;
+    address public factoryAddress;
 
     constructor(address _token) ERC20("Runiswap-V1", "RUNI-V1") {
         require(_token != address(0), "Invalid token address");
 
         tokenAddress = _token;
+        factoryAddress = msg.sender;
     }
 
     function addLiquidity(uint256 _tokenAmount) public payable returns (uint256) {
@@ -37,17 +51,24 @@ contract Exchange is ERC20 {
 
             return liquidity;
         }
+    }
+
+    function removeLiquidity(uint256 _amount) public returns (uint256, uint256) {
+        require(_amount > 0, "invalid amount");
         
+        uint256 ethAmount = (address(this).balance * _amount) / totalSupply();
+        uint256 tokenAmount = (getReserve() * _amount) / totalSupply();
+
+        _burn(msg.sender, _amount);
+
+        payable(msg.sender).transfer(ethAmount);
+        IERC20(tokenAddress).transfer(msg.sender, tokenAmount);
+
+        return (ethAmount, tokenAmount);
     }
 
     function getReserve() public view returns(uint256) {
         return IERC20(tokenAddress).balanceOf((address(this)));
-    }
-
-    function getPrice(uint256 inputReserve, uint256 outputReserve) public pure returns(uint256) {
-        require(inputReserve > 0 && outputReserve > 0, "Invalid reserves");
-
-        return inputReserve * 1000 / outputReserve;
     }
 
     function getTokenAmount(uint256 _ethSold) public view returns (uint256) {
@@ -66,13 +87,28 @@ contract Exchange is ERC20 {
         return getAmount(_tokenSold, tokenReserve, address(this).balance);
     }
 
-    function ethToTokenSwap(uint256 _minTokens) public payable {
+    function ethToToken(uint256 _minTokens, address recipient) private {
         uint256 tokenReserve = getReserve();
-        uint256 tokensBought = getAmount(msg.value, address(this).balance, tokenReserve);
+        uint256 tokensBought = getAmount(
+            msg.value,
+            address(this).balance - msg.value,
+            tokenReserve
+        );
 
         require(tokensBought >= _minTokens, "insufficient output amount");
 
-        IERC20(tokenAddress).transfer(msg.sender, tokensBought);
+        IERC20(tokenAddress).transfer(recipient, tokensBought);
+    }
+
+        function ethToTokenTransfer(uint256 _minTokens, address _recipient)
+        public
+        payable
+    {
+        ethToToken(_minTokens, _recipient);
+    }
+
+    function ethToTokenSwap(uint256 _minTokens) public payable {
+        ethToToken(_minTokens, msg.sender);
     }
 
     function tokenToEthSwap(uint256 _tokensSold, uint256 _minEth) public {
@@ -85,18 +121,27 @@ contract Exchange is ERC20 {
         payable(msg.sender).transfer(ethBought);
     }
 
-    function removeLiquidity(uint256 _amount) public returns (uint256, uint256) {
-        require(_amount > 0, "invalid amount");
-        
-        uint256 ethAmount = (address(this).balance * _amount) / totalSupply();
-        uint256 tokenAmount = (getReserve() * _amount) / totalSupply();
+    function tokenToTokenSwap( uint256 _tokensSold, uint256 _minTokensBought, address _tokenAddress) public {
+        address exchangeAddress = IFactory(factoryAddress).getExchange(_tokenAddress); 
 
-        _burn(msg.sender, _amount);
+        require(
+            exchangeAddress != address(this) && exchangeAddress != address(0), 
+            "invalid exchange address"
+        ); //check if the exchange for the given tokenAddress exists or not
 
-        payable(msg.sender).transfer(ethAmount);
-        IERC20(tokenAddress).transfer(msg.sender, tokenAmount);
+        uint256 tokenReserve = getReserve();
+        uint256 ethBought = getAmount(
+            _tokensSold,
+            tokenReserve,
+            address(this).balance
+        );
 
-        return (ethAmount, tokenAmount);
+        IERC20(tokenAddress).transferFrom(msg.sender, address(this), _tokensSold);
+
+        IExchange(exchangeAddress).ethToTokenTransfer{value: ethBought}(
+            _minTokensBought,
+            msg.sender
+        );
     }
  
     // INTERNAL FUNCTIONS
@@ -109,4 +154,5 @@ contract Exchange is ERC20 {
 
         return numerator / denominator;
     }
+
 }
